@@ -1,6 +1,7 @@
 # mc-bot · 让基岩版也有「AI 玩家」
 
 🌐 **[English](README_EN.md)** · 中文
+📦 **[下载最新版](https://github.com/linyujiaxi-sys/bedrock-ai-player/releases/latest)** · 🔍 **[源码](https://github.com/linyujiaxi-sys/bedrock-ai-player)**
 
 ## 简介
 
@@ -151,7 +152,19 @@ bash tools/start.sh stop     # 全部停止
 
 ## 下载
 
-**GitHub：** https://github.com/linyujiaxi-sys/bedrock-ai-player
+### 📦 直接下载（推荐）
+
+**[⬇ 点这里下载最新版](https://github.com/linyujiaxi-sys/bedrock-ai-player/releases/latest)**
+
+解压即用，不用装 git。
+
+### 🔧 或者拉源码
+
+```bash
+git clone https://github.com/linyujiaxi-sys/bedrock-ai-player.git
+```
+
+**GitHub 主页：** https://github.com/linyujiaxi-sys/bedrock-ai-player
 
 | 目录 | 内容 |
 |---|---|

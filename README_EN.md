@@ -1,6 +1,7 @@
 # mc-bot · An "AI Player" for Bedrock Edition
 
 [中文说明](README.md) · **English**
+📦 **[Download latest](https://github.com/linyujiaxi-sys/bedrock-ai-player/releases/latest)** · 🔍 **[Source](https://github.com/linyujiaxi-sys/bedrock-ai-player)**
 
 ## Intro
 
@@ -148,6 +149,18 @@ Connect from Bedrock Edition on the same phone to `127.0.0.1:19132`.
 ---
 
 ## Download
+
+### 📦 Direct download (recommended)
+
+**[⬇ Download the latest release](https://github.com/linyujiaxi-sys/bedrock-ai-player/releases/latest)**
+
+Unzip and you're set — no git required.
+
+### 🔧 Or clone the source
+
+```bash
+git clone https://github.com/linyujiaxi-sys/bedrock-ai-player.git
+```
 
 **GitHub:** https://github.com/linyujiaxi-sys/bedrock-ai-player
 
