@@ -1,0 +1,23 @@
+# ── 截图（含设备界面，不上传）──
+screen_now.png
+*.screenshot.png
+
+# ── 日志 / 临时文件 ──
+*.log
+*.tmp
+*.bak
+*.orig
+
+# ── 本地密钥（不要把 key 写进仓库）──
+.env
+.env.local
+AI_KEY*
+
+# ── Node ──
+node_modules/
+package-lock.json
+
+# ── 编辑器 / 系统 ──
+.DS_Store
+.idea/
+.vscode/

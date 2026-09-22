@@ -1,0 +1,6 @@
+name: Sniffer
+main: Sniffer
+version: "1.0"
+api: ["1.0.0"]
+load: POSTWORLD
+description: 窃听动作包 - 诊断 bot 的挖/丢包

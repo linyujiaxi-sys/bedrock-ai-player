@@ -1,0 +1,19 @@
+name: HeightProbe
+main: HeightProbe
+version: "1.0"
+api: ["1.0.0"]
+load: POSTWORLD
+description: 地面探测插件 - 给 bot 提供世界感知
+commands:
+  ground:
+    description: 探测某坐标最高方块
+    usage: "/ground <x> <z>"
+  block:
+    description: 看某方块详情（id/meta/是否开门）
+    usage: "/block <x> <y> <z>"
+  ents:
+    description: 列出世界里所有实体（类型+数量）
+    usage: "/ents"
+  spawnmob:
+    description: 直接造一只生物
+    usage: "/spawnmob <实体名> [x y z]"

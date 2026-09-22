@@ -1,0 +1,393 @@
+════════════════════════════════════════════════════════════
+  MC 基岩版「真 AI 玩家」实战经验总结
+  记录时间：2026-09-20 凌晨 00:00 - 02:30
+  背景：魔改 Nukkit 1.26.44 服务端 + 自写 Node 客户端 + Sniffer 补丁
+  主角：AI 游戏名 DeepSeek，主人游戏名 Fishdream09
+════════════════════════════════════════════════════════════
+
+【一句话核心】
+补丁不是"改了就行" —— 每一个补丁都必须先想清楚三件事：
+   ① 谁说了算？      （权威在服务器，还是客户端？）
+   ② 会不会碰真人？  （第一个约束永远是"只对机器人生效"）
+   ③ 会不会打架？    （两个补丁的目标冲突时，谁覆盖谁？）
+
+
+════════════════════════════════════════════════════════════
+一、位置同步 —— 最痛的一章（踩了 6 个坑）
+════════════════════════════════════════════════════════════
+
+【坑 1】补丁用 setPosition() → 别人看不到她动
+  现象：她自己认为在走（本地变量变了），但客户端完全看不到
+  原因：Nukkit 的 setPosition() 只改服务器内存，不广播 MovePlayerPacket
+  修法：必须用 teleport()，Nukkit 才会广播给别人
+  代码：
+      Location loc = e.getPlayer().getLocation();
+      loc.x = v.x; loc.z = v.z; loc.y = ny;
+      e.getPlayer().teleport(loc);   // ★ 不能用 setPosition
+
+【坑 2】补丁没做白名单 → 把真人玩家"原地起飞"了
+  现象：主人一进服，人就不受控制地往天上飘（y 从 223 涨到 291）
+  原因：位置补丁对"所有玩家"生效，真人的 PlayerAuthInput 也被接管，
+        服务器每帧把真人 teleport 到他包里的坐标 → 客户端和服务器互相打架
+  修法：★★★ 任何补丁的第一个约束：只对机器人生效
+      if (v != null && patchOn("position")
+              && "DeepSeek".equals(e.getPlayer().getName())) {
+  这条踩了两次（第二次是"门自动关回去"），务必记住。
+
+【坑 3】gap 永远 = 2.0，无限重同步
+  现象：服务器每秒 50 次 "position 同步" 日志，gap 恒为 2.0，永不收敛
+  原因：她本地坐标和服务器坐标差 2 格；
+        服务器 teleport 她 → 她下一帧又上报旧坐标 → 再 teleport → 死循环
+  修法：服务器把"权威坐标"私聊告诉她，她本地直接对齐
+      // 服务器
+      e.getPlayer().sendMessage("[位]" + String.format("%.1f,%.1f,%.1f,%.1f",
+          loc.x, loc.y, loc.z, gy));
+      // 客户端
+      if (msg.indexOf('[位]') === 0) {
+          const a = msg.slice(3).split(',')
+          POS.x = +a[0]; POS.z = +a[2]
+          if (!flying) { POS.y = +a[1]; }
+          return
+      }
+
+【坑 4】tp 不了她 —— 位置补丁和"管理员 tp"抢控制权
+  现象：主人 /tp 她 → 她被强制送回原地
+  原因：她每 tick 上报"本地旧坐标"，补丁用旧坐标覆盖了 tp 的结果
+  修法：用"距离"判断是不是外力
+      她每 tick 只能移动几厘米 → 差异 > 8 格 = 100% 是"有人 tp 了她"
+      if (gap >= 8.0) {
+          // 接受服务器的新位置，不拉回，并告诉她
+          e.getPlayer().sendMessage("[位]" + cur.x + "," + cur.y + "," + cur.z + "," + gy);
+      } else if (gap > 0.5 || yBad) {
+          // 正常修正
+      }
+
+【坑 5】服务器"应该让她站多高" —— 由服务器权威决定
+  现象：她悬空 13 格 / 下半身陷在草方块里 / 挖了洞却不掉下去
+  原因：她本地的高度表是假的（只按 x 索引、不区分 z；而且被飞行污染）
+  修法：把决定权交给服务器（服务器知道真实世界）
+      private double groundFor(Level lv, double x, double y, double z) {
+          int bx = (int) Math.floor(x), bz = (int) Math.floor(z);
+          int from = (int) Math.floor(y) + 2;
+          for (int yy = from; yy >= from - 150; yy--) {   // ★ 搜 150 格（坑可能很深）
+              Block b = lv.getBlock(bx, yy, bz);
+              if (b.getId() != 0) return yy + 1;
+          }
+          return y;
+      }
+  注意：搜索范围一开始只给了 24 格，而出生点被挖了一个 89→53 的大坑，
+       够不到坑底 → 永远判她"站"在 89。改成 150 格后才正确。
+
+【坑 6】高度表 H[] 被飞行高度污染 → "取消飞行掉不下来"
+  现象：她飞在 81 米高，按"降落"后仍停在 81
+  原因：接收 [位] 消息时用"她当前 y"更新高度表 → 81 被记成"地面 80"
+        → 于是"落地"就落在 81
+  修法：高度表只在"脚真的踩在地面"时更新
+      if (!flying) {
+          ...
+          H[String(Math.floor(POS.x))] = Math.floor((sg !== null ? sg : POS.y)) - 1
+      }
+
+
+════════════════════════════════════════════════════════════
+二、飞行与重力（踩了 5 个坑）
+════════════════════════════════════════════════════════════
+
+【坑 7】"飞起来像跳了几下" —— 服务器每帧把她拉回地面
+  原因：落地逻辑太粗暴，她刚升 0.35 格就被按回去
+  中间方案（都失败了，记录教训）：
+    ① 用"她是否在上升"判断      → 只升 1 秒，之后不动，判定失效
+    ② 加 5 秒飞行窗口            → 窗口过期后被拉回
+    ③ 悬停时轻微浮动 0.03/次     → 幅度小于判定阈值 0.04，无效
+    ④ 加大到 0.06 + 阈值降到 0.02 → 仍有时序问题
+  最终方案（极简，一次成功）：
+      // 服务器：不猜她在不在飞
+      ny = (v.y < gy) ? gy : v.y;
+      // 高于地面 → 完全信她（飞/悬停/跳都随她）
+      // 低于地面 → 拉到地面（只防穿模和掉坑）
+  教训：★ 当"判断状态"变得复杂时，先想想能不能"不判断"。
+
+【坑 8】"取消飞行掉不下来" —— 两条规则互相打架
+  原因：我加的"5 秒飞行记忆" 和 旧的"飞得高就尊重她" 冲突
+  最终方案：见坑 7 的极简规则
+
+【坑 9】飞行上限 15 格 → 防止飞进"外太空"
+      if (flyDir > 0 && POS.y > g0 + 15) { POS.y = g0 + 15; flyDir = 0;
+          console.log('[飞] 到顶，自动悬停') }
+
+【坑 10】"起飞"应当是"升 1 秒后悬停"，而不是"原地不动"
+  原因：如果起飞只是把 flyDir 设 0，用户会以为"没飞起来"
+  修法：
+      flyDir = 1
+      setTimeout(() => { if (flying) { flyDir = 0; console.log('[飞] 已悬停') } }, 1000)
+
+
+════════════════════════════════════════════════════════════
+三、方块交互（门 / 放置 / 挖掘）
+════════════════════════════════════════════════════════════
+
+【坑 11】门"凭空生成"，还会自己关回去
+  原因：直接改世界数据（setBlock）但没通知客户端；
+        客户端不知道真值，会自己回滚 → 表现为"门自己关上"
+  修法：每次改方块后广播 UpdateBlockPacket
+      private void bcBlock(Level lv, Block b) {
+          UpdateBlockPacket pk = new UpdateBlockPacket();
+          pk.x = b.getFloorX(); pk.y = b.getFloorY(); pk.z = b.getFloorZ();
+          pk.blockRuntimeId = GlobalBlockPalette.getOrCreateRuntimeId(b.getFullId());
+          pk.flags = UpdateBlockPacket.FLAG_ALL_PRIORITY;
+          pk.dataLayer = 0;
+          for (Player p : lv.getPlayers().values()) p.dataPacket(pk);
+      }
+  注意：Block 没有 getRuntimeId()，要用
+       GlobalBlockPalette.getOrCreateRuntimeId(b.getFullId())
+
+【坑 12】门变成"透明幽灵方块"，点不动
+  原因：★ 门的下半也带了 0x08（TOP 位）→ 客户端把它当"上半"渲染
+        上下两块都带 TOP 位 → 变成幽灵
+  修法：
+      // 下半：强制清掉 TOP 位
+      nb.setDamage(nb.getDamage() & ~0x08 & 0xFF);
+      lvl.setBlock(dst, nb);
+      // 上半：带 TOP 位
+      Block up = (Block) nb.clone();
+      up.setDamage((nb.getDamage() | 0x08) & 0xFF);
+      lvl.setBlock(dst.up(), up);
+  门 meta 位速查：
+      0x04 = OPEN（开着）
+      0x08 = TOP（上半）
+      0x01 = HINGE（合页方向）
+
+【坑 13】放门时"破坏了旁边的方块"
+  原因：调用了 Nukkit 的 nb.place(...) —— 它内部会改写周围方块
+  修法：★ 不调用 place()，直接 setBlock
+      // 只设好坐标和 level
+      nb.x = dst.x; nb.y = dst.y; nb.z = dst.z; nb.level = lvl;
+      lvl.setBlock(dst, nb);
+      bcBlock(lvl, lvl.getBlock(dst));
+
+【坑 14】"开门"变成"又放了一扇门"
+  原因：客户端记的 doorPos 指向的门"已经被捡走了"，
+        对着空气 doUse → 补丁走"放置"分支 → 又放一扇
+  修法：服务器自己在她身边 ±2 格扫描找门
+      if (!(target instanceof BlockDoor)) {
+          int cxp = (int) Math.floor(pp.x), cyp = (int) Math.floor(pp.y), czp = (int) Math.floor(pp.z);
+          outer:
+          for (int ddx = -2; ddx <= 2; ddx++)
+              for (int ddy = -2; ddy <= 1; ddy++)
+                  for (int ddz = -2; ddz <= 2; ddz++) {
+                      Block bb = lvl.getBlock(cxp+ddx, cyp+ddy, czp+ddz);
+                      if (bb instanceof BlockDoor) { target = bb; break outer; }
+                  }
+      }
+
+【坑 15】挖掘失效 —— 补丁"自作聪明"地发了 stop_break
+  原因：doDig 里 400ms 后自己发了 stop_break，把挖掘取消了
+  修法：删掉 stop_break，让 sendInput 持续发 block_action
+      if (t < 350) ba = [{ action: 'start_break', position: bp, face: 1 }]
+      else { ba = [{ action: 'predict_break', position: bp, face: 1 }];
+             if (t > 700) digState = null }
+  协议事实：真正触发破坏的是 predict_break(26)，不是 start_break
+
+【坑 16】挖空气 —— 她悬空，脚下没方块
+  修法：服务器"帮她找实心方块挖"
+      从目标位置往下最多 20 格找第一个非空气方块，把它挖掉
+      并把"真实地面高度"私聊告诉她：[地]N
+
+【坑 17】她只会挖脚下，不会挖前方
+  原因：工具表里只有 dig_down
+  修法：新增 dig_forward 工具（按 yaw 算前方 1.2 格）
+      const fx = Math.floor(POS.x - Math.sin(yaw) * 1.2)
+      const fz = Math.floor(POS.z - Math.cos(yaw) * 1.2)
+
+
+════════════════════════════════════════════════════════════
+四、AI 大脑（架构级教训）
+════════════════════════════════════════════════════════════
+
+【坑 18】★★★ "关键词触发"是错误的架构
+  用户原话："不应该是 AI 调用工具打开关闭门吗，为什么要加关键词然后我说什么
+            世界做什么，AI 只是说话？那这样做项目没意义"
+  错误做法：你说"开门" → 正则匹配 → 执行（这是"语音遥控器"）
+  正确做法：你说任何话 → AI 自己判断该调用哪个工具 → 执行
+  实现：API 的 function calling（tools 参数 + tool_choice: 'auto'）
+  工具表（9 个）：
+      come_to_player / dig_down / dig_forward / place_door /
+      toggle_door / take_off / land / drop_item / move_item / look_around
+  支持多轮工具调用（最多 3 层递归）：
+      if (m.tool_calls && m.tool_calls.length) {
+          aiHistory.push({ role: 'assistant', content: m.content || '', tool_calls: m.tool_calls })
+          for (const tc of m.tool_calls) {
+              const res = TOOL_IMPL[tc.function.name](JSON.parse(tc.function.arguments||'{}'))
+              aiHistory.push({ role: 'tool', tool_call_id: tc.id, content: String(res) })
+          }
+          if (depth < 3) { askAI('', cb, depth + 1); return }
+      }
+
+【坑 19】★★★ API 的"推理内容"吃光了输出额度 → 她哑巴了
+  现象：她突然不理人，日志显示 [AI] 无 message
+  原因：底层模型会先输出 reasoning_content（思考过程），
+        max_tokens 只给了 300 → 全被思考占用，content 是空的
+  证据（直接 curl API）：
+      "content": "",                                    ← 空！
+      "reasoning_content": "我们需要回答用户：...",
+      "finish_reason": "length"                         ← 额度用完
+  修法：max_tokens: 300 → 900
+
+【坑 20】认主 —— 服务器广播的 source_name 是空的
+  现象：她说"才不是呢，我主人一直在旁边"
+  原因：① 拿不到"说话人是谁"  ② 系统提示词没写"Fishdream09 是主人"
+  修法：
+      ① 从广播文本 " 过来" 里用正则挖出说话人
+      ② 系统提示词写死："Fishdream09 就是你的主人本人…绝不能说'才不是'"
+      ③ 消息格式标成 [主人 Fishdream09] 递到她眼前
+
+【坑 21】防自问自答
+      if (src === 'DeepSeek' || msg.indexOf('<DeepSeek>') === 0) return
+
+
+════════════════════════════════════════════════════════════
+五、网络与登录（血泪）
+════════════════════════════════════════════════════════════
+
+【坑 22】进不去服 —— 表面像 IPv6，实际是 JWT 验证失败
+  现象：登录报 Invalid login data，日志：
+      Unable to find a suitable verification key ...
+      due to (java.net.SocketException: Connection reset)
+      while obtaining keys from JWKS endpoint
+  排查过程（重要方法论）：
+      ① 确认服务器在跑            → 在
+      ② 确认端口在监听            → 在
+      ③ 单独测域名连通            → IPv4 3/3 成功，IPv6 0/3 失败
+      ④ ★ 实际写一个 Java 程序测 Java 的解析行为：
+            InetAddress.getAllByName("authorization.franchise.minecraft-services.net")
+        结果：Java 解析出来的就是 IPv4（150.171.110.133）！
+        → 结论：★ IPv6 不是本次的原因
+      ⑤ 真因：Java 连微软的 JWKS 端点时连接被重置（Azure 侧或 TLS 握手）
+  尝试过的参数（保留在启动命令里，无害）：
+      -Djava.net.preferIPv4Stack=true
+      -Dhttps.protocols=TLSv1.2,TLSv1.3
+      -Djdk.tls.client.protocols=TLSv1.2
+  教训：★ "看起来像 X" 不等于 "就是 X"。写个小程序验证一下，比猜 10 次都强。
+
+【坑 23】修改 /etc/hosts 和 /etc/gai.conf 在沙盒里对 Java 无效
+  试过：hosts 钉 IP、gai.conf 设 precedence、sysctl 关 IPv6
+  结果：getent 仍返回 IPv6；sysctl permission denied
+  结论：不要在这上面浪费时间，先用"小程序验证真实行为"
+
+
+════════════════════════════════════════════════════════════
+六、协议层（写进 DNA 的规律）
+════════════════════════════════════════════════════════════
+
+【规律 1】★★★ Nukkit 布尔消耗不统一
+      if (getBoolean()) { if (getBoolean()) { 读值 } }
+      → false 消耗 1 个布尔，true 消耗 2 个
+  协议表必须写 switch 而不是 option（全项目踩了 3 次）
+
+【规律 2】魔改版的特征是"留下数据结构，删掉游戏逻辑"
+      我们看到的现象：
+        ① move_player 无接收
+        ② 无 ItemStackRequestPacket
+        ③ 无事务校验器 InventoryTransaction
+        ④ TYPE_ITEM_RELEASE(4) 不干活
+        ⑤ TYPE_NORMAL(0) 不干活
+        ⑥ TYPE_USE_ITEM(2) 不干活
+        ⑦ BlockDoor.toggle() 返回 true 却不落盘
+        ⑧ CREATIVE_DESTROY_BLOCK 是废枚举
+        ⑨ Level 无 autoSpawn（生物完全不会生成）
+      所以"补丁"的本质 = 把被删掉的逻辑在插件层补回来
+
+【规律 3】InputData 位表（用到的）
+      34 = item_interact
+      35 = block_action
+      36 = item_stack_request
+
+【规律 4】InventoryTransaction 类型
+      0 = TYPE_NORMAL      （背包移动）
+      2 = TYPE_USE_ITEM    （放置 / 开关门 / 按钮）
+      4 = TYPE_ITEM_RELEASE（丢东西）
+
+
+════════════════════════════════════════════════════════════
+七、方法论（比代码更重要）
+════════════════════════════════════════════════════════════
+
+① 别猜协议 —— 把字节塞进 BinaryStream.buffer 调 packet.decode() 验证
+② 先判断"解不出来"还是"解出来不干活"—— 这两类问题修法完全不同
+③ 每个补丁必须带幂等守卫（已经是目标状态 → 跳过）
+④ 每个补丁必须有开关（config.yml 里一项）
+⑤ 关键结论写进脚本头部注释（当小抄）
+⑥ "查不到" 和 "不存在" 是两件事
+⑦ ★★★ 任何补丁的第一个约束必须是"不许碰真人"（本项目踩了两次）
+⑧ ★★★ 优先"服务器权威"：客户端不知道世界，服务器知道
+⑨ ★★★ 当"状态判断"变复杂时，先想能不能"不判断"（飞行修复的最终答案）
+⑩ ★★★ 用户的一句直觉描述，抵得上自己跑 100 次测试
+      真实案例：
+        "我进游戏怎么原地起飞了"     → 补丁没做白名单
+        "我觉得他这个门更像是生成出来的" → setBlock 没有广播
+        "看起来像跳了几下"           → 升一秒就被拉回
+        "取消飞行掉不下来"           → 两条规则打架
+        "他下半身在草方块里"         → 坐标偏 2 格，gap 永不收敛
+
+
+════════════════════════════════════════════════════════════
+八、当前可用状态（2026-09-20 02:30）
+════════════════════════════════════════════════════════════
+
+服务端：/tmp/nukkit_server2  （Nukkit 1.26.44 魔改版，端口 19132）
+插件：Sniffer.jar（补丁集）+ HeightProbe.jar（调试工具）
+客户端：/tmp/mcact.js（Node 写的假客户端，AI 名字 DeepSeek）
+
+启动命令（★ 内存必须限制，IPv4/TLS 参数保留）：
+  cd /tmp/nukkit_server2
+  rm -f /tmp/nukkit_cmd; mkfifo -m 666 /tmp/nukkit_cmd
+  nohup sh -c 'tail -f /tmp/nukkit_cmd | java -Xmx512M \
+      -Djava.net.preferIPv4Stack=true \
+      -Dhttps.protocols=TLSv1.2,TLSv1.3 \
+      -jar nukkit.jar --no-wizard' > /tmp/nukkit_server2.log 2>&1 &
+  nohup node /tmp/mcact.js > /tmp/mcact.log 2>&1 &
+
+控制台 FIFO：/tmp/nukkit_cmd   （echo "give DeepSeek wooden_door 16" > 它）
+机器人指令口：/tmp/mc_cmd      （come/dig/use/fly/land/hold/ask/say/pos/inv…）
+
+已通功能：
+  ✅ 位置同步（服务器权威 + 客户端对齐）
+  ✅ 飞行（升空悬停）+ 降落（稳定落地）
+  ✅ 重力（掉坑、挖掘后下坠）
+  ✅ 挖掘（脚下 + 前方）
+  ✅ 放置门（面前一格，不破坏旁边方块）
+  ✅ 开关门（服务器自动找门）
+  ✅ 丢弃 / 拾取
+  ✅ 背包移动
+  ✅ 走过 / 跟随
+  ✅ AI 自主调用工具（不再是关键词触发）
+  ✅ 认主（Fishdream09 = 主人）
+
+待办：
+  ⬜ 攻击生物（能生成但打不死）
+  ⬜ 箱子存取
+  ⬜ 骑乘
+  ⬜ 受伤 / 重生 / 死亡
+  ⬜ 生物 AI（自动生成器不存在，需在插件层实现）
+  ⬜ 登录稳定（JWKS 本地缓存方案）
+
+
+════════════════════════════════════════════════════════════
+九、给后来者的话
+════════════════════════════════════════════════════════════
+
+这个项目最大的体会：
+  真正难的从来不是"写代码"，而是——
+      · 想清楚"谁说了算"
+      · 想清楚"会不会影响别人"
+      · 想清楚"两个补丁会不会打架"
+
+今晚 2.5 小时里，主人一个人进游戏测出了 20+ 个真 bug，
+没有一个是误报。而其中大部分，都是"补丁打架"和"权威不清"造成的。
+
+所以记住：
+  补丁不是越多越好，而是每个补丁都必须问自己：
+      "我凭什么改这个？改完谁负责？会不会影响到别人？"
+
+          —— 写于 2026-09-20 02:30，凌晨
+════════════════════════════════════════════════════════════
